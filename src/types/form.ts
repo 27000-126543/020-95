@@ -49,6 +49,13 @@ export type TechnicianIssue =
   | '垂直距离需确认'
   | '前伸平衡咬合设置疑问'
 
+export type IssueSeverity = 'minor' | 'confirm' | 'revisit'
+
+export interface IssueWithSeverity {
+  issue: TechnicianIssue
+  severity: IssueSeverity
+}
+
 export interface OcclusionFormData {
   id?: string
   patientCode: string
@@ -117,7 +124,8 @@ export interface TechnicianReceipt {
   technicianName: string
   labName: string
   issues: {
-    selected: TechnicianIssue[]
+    selected: IssueWithSeverity[]
+    legacySelected?: TechnicianIssue[]
     details: string
   }
   modelCondition: '良好' | '一般' | '较差' | ''
@@ -128,3 +136,29 @@ export interface TechnicianReceipt {
   technicianSignature: string
   receiptCreatedAt?: string
 }
+
+export interface FormHistoryItem {
+  id: string
+  filePath: string
+  patientCode: string
+  restorationType: string
+  hasReceipt: boolean
+  lastUpdatedAt: string
+  dentistName?: string
+  priority?: string
+}
+
+export interface FormStep {
+  key: string
+  title: string
+  subtitle?: string
+  requiredFields: string[]
+}
+
+export interface MissingField {
+  key: string
+  label: string
+  step: string
+}
+
+export type View = 'list' | 'fill' | 'preview' | 'receipt'

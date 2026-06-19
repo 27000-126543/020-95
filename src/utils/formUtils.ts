@@ -1,10 +1,12 @@
-import type { OcclusionFormData, TechnicianReceipt } from '@/types/form'
+import type { OcclusionFormData, TechnicianReceipt, IssueWithSeverity, TechnicianIssue } from '@/types/form'
+import { generateFormId as genId } from '@/utils/historyStore'
 
 export function createEmptyForm(): OcclusionFormData {
   const today = new Date().toISOString().slice(0, 10)
   const estimatedDate = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
 
   return {
+    id: genId(),
     patientCode: '',
     patientAge: '',
     patientGender: '',
@@ -81,6 +83,41 @@ export function createEmptyReceipt(): TechnicianReceipt {
     specialInstructions: '',
     technicianSignature: ''
   }
+}
+
+export function migrateFormData(data: OcclusionFormData): OcclusionFormData {
+  const migrated = { ...data }
+
+  if (!migrated.id) {
+    migrated.id = genId()
+  }
+
+  if (migrated.receipt) {
+    const receipt = { ...migrated.receipt }
+    if (receipt.issues && receipt.issues.legacySelected && receipt.issues.legacySelected.length > 0) {
+      const upgraded: IssueWithSeverity[] = receipt.issues.legacySelected.map((issue: TechnicianIssue) => ({
+        issue,
+        severity: 'confirm' as const
+      }))
+      receipt.issues = {
+        selected: upgraded,
+        details: receipt.issues.details || ''
+      }
+    }
+    if (!receipt.issues) {
+      receipt.issues = { selected: [], details: '' }
+    }
+    migrated.receipt = receipt
+  }
+
+  return migrated
+}
+
+export function migrateLegacySelected(
+  legacy?: TechnicianIssue[]
+): IssueWithSeverity[] {
+  if (!legacy) return []
+  return legacy.map(issue => ({ issue, severity: 'confirm' }))
 }
 
 export function formatDate(dateString: string): string {
