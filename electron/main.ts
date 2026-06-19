@@ -143,3 +143,80 @@ ipcMain.handle('print-form', async () => {
   }
   return { success: false }
 })
+
+ipcMain.handle('load-form-by-path', async (_event, filePath: string) => {
+  try {
+    if (!filePath || !fs.existsSync(filePath)) {
+      return { success: false, error: '文件不存在' }
+    }
+    const content = fs.readFileSync(filePath, 'utf-8')
+    const data = JSON.parse(content)
+    return { success: true, data, filePath }
+  } catch (error) {
+    return { success: false, error: (error as Error).message }
+  }
+})
+
+ipcMain.handle('export-transfer-package', async (_event, pkg: unknown) => {
+  try {
+    const anyPkg = pkg as Record<string, unknown>
+    const patientCode = (anyPkg.formData as Record<string, unknown>)?.patientCode ?? 'unknown'
+    const result = await dialog.showSaveDialog(mainWindow!, {
+      title: '导出交接包',
+      defaultPath: `交接包_${patientCode}_${new Date().toISOString().slice(0, 10)}.ocp.json`,
+      filters: [{ name: '咬合交接包', extensions: ['ocp.json', 'json'] }]
+    })
+    if (!result.canceled && result.filePath) {
+      const savePkg = {
+        ...pkg,
+        exportedAt: new Date().toISOString()
+      }
+      fs.writeFileSync(result.filePath, JSON.stringify(savePkg, null, 2), 'utf-8')
+      return { success: true, filePath: result.filePath }
+    }
+    return { success: false, canceled: true }
+  } catch (error) {
+    return { success: false, error: (error as Error).message }
+  }
+})
+
+ipcMain.handle('import-transfer-package', async () => {
+  try {
+    const result = await dialog.showOpenDialog(mainWindow!, {
+      title: '导入交接包',
+      filters: [{ name: '咬合交接包 / JSON', extensions: ['ocp.json', 'json'] }],
+      properties: ['openFile']
+    })
+    if (!result.canceled && result.filePaths.length > 0) {
+      const content = fs.readFileSync(result.filePaths[0], 'utf-8')
+      const pkg = JSON.parse(content)
+      return { success: true, package: pkg, filePath: result.filePaths[0] }
+    }
+    return { success: false, canceled: true }
+  } catch (error) {
+    return { success: false, error: (error as Error).message }
+  }
+})
+
+ipcMain.handle('save-package-form', async (_event, data, suggestedName) => {
+  try {
+    const name = suggestedName || `咬合交接单_${new Date().toISOString().slice(0, 10)}.json`
+    const result = await dialog.showSaveDialog(mainWindow!, {
+      title: '保存交接单',
+      defaultPath: name,
+      filters: [{ name: 'JSON 文件', extensions: ['json'] }]
+    })
+    if (!result.canceled && result.filePath) {
+      const saveData = {
+        ...data,
+        createdAt: (data as Record<string, unknown>)?.createdAt ?? new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      }
+      fs.writeFileSync(result.filePath, JSON.stringify(saveData, null, 2), 'utf-8')
+      return { success: true, filePath: result.filePath }
+    }
+    return { success: false, canceled: true }
+  } catch (error) {
+    return { success: false, error: (error as Error).message }
+  }
+})

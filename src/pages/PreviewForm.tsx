@@ -1,8 +1,9 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect, useRef } from 'react'
 import type { OcclusionFormData, IssueWithSeverity, MovementObservation, SpecialConcern, TechnicianIssue, IssueSeverity } from '@/types/form'
-import { formatDate, formatDateTime, validateForm } from '@/utils/formUtils'
+import { formatDate, formatDateTime, validateForm, migrateFormData } from '@/utils/formUtils'
 import { ISSUE_SEVERITY_MAP } from '@/constants/steps'
 import { upsertHistory } from '@/utils/historyStore'
+import { buildTransferPackage } from '@/utils/issueManager'
 import type { FormStore } from '@/hooks/useFormStore'
 
 interface PreviewFormProps {
@@ -10,11 +11,20 @@ interface PreviewFormProps {
   onBack: () => void
   onFillReceipt: () => void
   onBackToList: () => void
+  focusSummary?: boolean
 }
 
-export function PreviewForm({ store, onBack, onFillReceipt, onBackToList }: PreviewFormProps) {
-  const { formData, loadedFilePath, addReceipt, markSaved } = store
+export function PreviewForm({ store, onBack, onFillReceipt, onBackToList, focusSummary }: PreviewFormProps) {
+  const { formData, loadedFilePath, addReceipt, markSaved, setFormData } = store
   const [showSuccess, setShowSuccess] = useState<string>('')
+  const [pkgNotes, setPkgNotes] = useState('')
+  const summaryRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (focusSummary && summaryRef.current) {
+      summaryRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }
+  }, [focusSummary])
 
   const handlePrint = async () => {
     await window.electronAPI.printForm()
@@ -27,12 +37,38 @@ export function PreviewForm({ store, onBack, onFillReceipt, onBackToList }: Prev
       return
     }
 
-    const result = await window.electronAPI.saveForm(formData)
+    const result = await window.electronAPI.savePackageForm(formData, loadedFilePath ? undefined : `咬合交接单_${formData.patientCode || '新病例'}_${new Date().toISOString().slice(0, 10)}.json`)
     if (result.success && result.filePath) {
+      // 回读验证
+      try {
+        const rt = await window.electronAPI.loadFormByPath(result.filePath)
+        if (rt.success && rt.data) {
+          const normalized = migrateFormData(rt.data as OcclusionFormData)
+          setFormData(normalized)
+        }
+      } catch {
+        /* 回读失败不阻塞 */
+      }
       markSaved(result.filePath)
       upsertHistory(result.filePath, formData)
-      setShowSuccess('✓ 文件已保存：' + result.filePath)
-      setTimeout(() => setShowSuccess(''), 4000)
+      setShowSuccess('✓ 文件已保存并验证：' + result.filePath)
+      window.setTimeout(() => setShowSuccess(''), 4200)
+    }
+  }
+
+  const handleExportPackage = async () => {
+    const actorName = formData.dentistName || formData.clinicName || '诊所'
+    const pkg = buildTransferPackage(formData, {
+      actorType: 'clinic',
+      actorName,
+      contact: formData.clinicPhone,
+      additionalNotes: pkgNotes.trim() || undefined
+    })
+    const r = await window.electronAPI.exportPackage(pkg)
+    if (r.success && r.filePath) {
+      setShowSuccess('✓ 交接包已导出：' + r.filePath)
+      window.setTimeout(() => setShowSuccess(''), 4200)
+      setPkgNotes('')
     }
   }
 
@@ -42,6 +78,14 @@ export function PreviewForm({ store, onBack, onFillReceipt, onBackToList }: Prev
   }
 
   const hasReceipt = !!formData.receipt
+  const transferSource = (formData as unknown as { transferSource?: {
+    type?: 'clinic' | 'lab'
+    name?: string
+    contact?: string
+    exportedAt?: string
+    importedAt?: string
+    latestNotes?: string
+  } }).transferSource
 
   const actionItems = useMemo(() => {
     if (!hasReceipt) return null
@@ -80,6 +124,9 @@ export function PreviewForm({ store, onBack, onFillReceipt, onBackToList }: Prev
         <div className="header-actions">
           <button className="btn btn-secondary" onClick={onBack}>返回编辑</button>
           <button className="btn btn-secondary" onClick={handlePrint}>打印</button>
+          <button className="btn btn-secondary" onClick={handleExportPackage} title="导出包含表单、回执、备注的 .ocp.json 交接包">
+            📤 导出交接包
+          </button>
           <button className="btn btn-primary" onClick={handleSave}>保存文件</button>
           {!hasReceipt && (
             <button className="btn btn-accent" onClick={handleFillReceipt}>填写技工回执</button>
@@ -91,6 +138,17 @@ export function PreviewForm({ store, onBack, onFillReceipt, onBackToList }: Prev
         <div className="alert alert-success no-print">{showSuccess}</div>
       )}
 
+      {transferSource && (
+        <div className="pkg-source-bar no-print">
+          <span>🔗 交接来源：</span>
+          <strong>{transferSource.type === 'lab' ? '🏭 技工所' : '🏥 诊所'} — {transferSource.name || '未知'}</strong>
+          {transferSource.exportedAt && <span>· 导出：{formatDateTime(transferSource.exportedAt)}</span>}
+          {transferSource.importedAt && <span>· 本地导入：{formatDateTime(transferSource.importedAt)}</span>}
+          {transferSource.contact && <span>· 联系方式：{transferSource.contact}</span>}
+          {transferSource.latestNotes && <span>· 最近备注：<em style={{ color: 'var(--text-primary)' }}>"{transferSource.latestNotes}"</em></span>}
+        </div>
+      )}
+
       <div className="preview-content">
         <div className="preview-header print-only">
           <h1 className="document-title">口腔修复咬合交接单</h1>
@@ -98,10 +156,13 @@ export function PreviewForm({ store, onBack, onFillReceipt, onBackToList }: Prev
         </div>
 
         {hasReceipt && actionItems && (actionItems.total > 0 || actionItems.needsReturn) && (
-          <div className="action-summary no-print">
+          <div className="action-summary no-print" ref={summaryRef}>
             <div className="action-summary-header">
               <h3>🔔 医生需处理汇总</h3>
               {actionItems.needsReturn && <span className="badge badge-red">⚠ 需要返诊</span>}
+              <button className="btn-link btn-ghost" onClick={onBack} style={{ marginLeft: 'auto' }}>
+                跳转编辑
+              </button>
             </div>
             {(['revisit', 'confirm', 'minor'] as IssueSeverity[]).map(sev => {
               const list = actionItems.bySeverity[sev]
@@ -124,6 +185,22 @@ export function PreviewForm({ store, onBack, onFillReceipt, onBackToList }: Prev
                 <p>{actionItems.returnReason}</p>
               </div>
             )}
+          </div>
+        )}
+
+        {hasReceipt ? null : (
+          <div className="no-print" style={{ marginBottom: 20 }}>
+            <div className="text-input-label" style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 6 }}>
+              📝 交接备注（随导出的交接包发送，对方导入后可见）
+            </div>
+            <textarea
+              className="text-input"
+              rows={2}
+              value={pkgNotes}
+              onChange={e => setPkgNotes(e.target.value)}
+              placeholder="如：本次修复为二次印模，请优先安排制作；任何疑问请联系王医生 138xxxxxx。"
+              style={{ width: '100%', minHeight: 60 }}
+            />
           </div>
         )}
 
@@ -239,6 +316,12 @@ export function PreviewForm({ store, onBack, onFillReceipt, onBackToList }: Prev
           <div className="signature-block"><span className="preview-label">日期：</span><span className="signature-line">{formatDate(formData.fillDate)}</span></div>
         </div>
 
+        {formData.notes && (
+          <div className="preview-notes" style={{ borderLeft: '3px solid var(--color-primary)', paddingLeft: 12, marginTop: 16 }}>
+            <span className="preview-label">整体备注：</span><span>{formData.notes}</span>
+          </div>
+        )}
+
         {formData.createdAt && (
           <div className="preview-meta print-only">
             <p>创建时间：{formatDateTime(formData.createdAt)}</p>
@@ -257,6 +340,9 @@ export function PreviewForm({ store, onBack, onFillReceipt, onBackToList }: Prev
       <div className="form-footer no-print">
         <button className="btn btn-secondary" onClick={onBack}>返回编辑</button>
         <div className="footer-actions">
+          <button className="btn btn-secondary" onClick={handleExportPackage} title="导出 .ocp.json 交接包">
+            📤 导出交接包
+          </button>
           <button className="btn btn-secondary" onClick={handlePrint}>打印交接单</button>
           <button className="btn btn-primary" onClick={handleSave}>保存文件</button>
         </div>

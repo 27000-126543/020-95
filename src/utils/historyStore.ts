@@ -1,4 +1,5 @@
-import type { FormHistoryItem, OcclusionFormData } from '@/types/form'
+import type { FormHistoryItem, OcclusionFormData, CaseStatus } from '@/types/form'
+import { determineCaseStatus } from './stepValidator'
 
 const HISTORY_KEY = 'occlusion_form_history'
 const MAX_HISTORY = 50
@@ -34,6 +35,7 @@ export function upsertHistory(
   const history = getHistory()
   const now = new Date().toISOString()
   const id = formData.id || `form-${Date.now()}`
+  const status: CaseStatus = determineCaseStatus(formData)
 
   const existingIdx = history.findIndex(h => h.filePath === filePath)
   const item: FormHistoryItem = {
@@ -44,7 +46,8 @@ export function upsertHistory(
     hasReceipt: !!formData.receipt,
     lastUpdatedAt: now,
     dentistName: formData.dentistName,
-    priority: formData.priority
+    priority: formData.priority,
+    status
   }
 
   if (existingIdx >= 0) {

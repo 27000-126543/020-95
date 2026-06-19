@@ -13,7 +13,7 @@ import {
   GENDER_OPTIONS
 } from '@/constants/options'
 import { FORM_STEPS } from '@/constants/steps'
-import { validateForm } from '@/utils/formUtils'
+import { validateForm, migrateFormData } from '@/utils/formUtils'
 import { getMissingFields, getStepProgress, getOverallProgress } from '@/utils/stepValidator'
 import { upsertHistory } from '@/utils/historyStore'
 import type { FormStore } from '@/hooks/useFormStore'
@@ -22,15 +22,29 @@ interface FillFormProps {
   store: FormStore
   onPreview: () => void
   onBackToList: () => void
+  focusReceipt?: boolean
 }
 
-export function FillForm({ store, onPreview, onBackToList }: FillFormProps) {
-  const { formData, updateFormData, updateSection, resetForm, markSaved } = store
-  const [currentStep, setCurrentStep] = useState(0)
+export function FillForm({ store, onPreview, onBackToList, focusReceipt }: FillFormProps) {
+  const { formData, updateFormData, updateSection, resetForm, markSaved, setFormData } = store
+  const missingFieldsFirst = useMemo(() => {
+    const mf = getMissingFields(formData)
+    if (focusReceipt && formData.receipt === undefined) {
+      // 待技工回执：直接跳到当前缺项最集中的步骤（若无缺项则最后一步）
+      if (mf.length === 0) return { mf, initStep: FORM_STEPS.length - 1 }
+      const counts = new Map<string, number>()
+      FORM_STEPS.forEach(s => counts.set(s.key, 0))
+      mf.forEach(f => counts.set(f.step, (counts.get(f.step) || 0) + 1))
+      let bestKey = FORM_STEPS[0].key, bestN = -1
+      counts.forEach((n, k) => { if (n > bestN) { bestN = n; bestKey = k } })
+      return { mf, initStep: Math.max(0, FORM_STEPS.findIndex(s => s.key === bestKey)) }
+    }
+    return { mf, initStep: 0 }
+  }, [formData, focusReceipt])
+  const missingFields = missingFieldsFirst.mf
+  const [currentStep, setCurrentStep] = useState(missingFieldsFirst.initStep)
   const [errors, setErrors] = useState<string[]>([])
   const [showSuccess, setShowSuccess] = useState<string>('')
-
-  const missingFields = useMemo(() => getMissingFields(formData), [formData])
   const stepProgress = useMemo(() => getStepProgress(formData), [formData])
   const overallProgress = useMemo(() => getOverallProgress(formData), [formData])
 
@@ -44,12 +58,22 @@ export function FillForm({ store, onPreview, onBackToList }: FillFormProps) {
     }
     setErrors([])
 
-    const result = await window.electronAPI.saveForm(formData)
+    const result = await window.electronAPI.savePackageForm(
+      formData,
+      store.loadedFilePath ? undefined : `咬合交接单_${formData.patientCode || '新病例'}_${new Date().toISOString().slice(0, 10)}.json`
+    )
     if (result.success && result.filePath) {
+      try {
+        const rt = await window.electronAPI.loadFormByPath(result.filePath)
+        if (rt.success && rt.data) {
+          const normalized = migrateFormData(rt.data as OcclusionFormData)
+          setFormData(normalized)
+        }
+      } catch { /* 不阻塞 */ }
       markSaved(result.filePath)
       upsertHistory(result.filePath, formData)
-      setShowSuccess(`✓ 文件已保存：${result.filePath}`)
-      setTimeout(() => setShowSuccess(''), 4000)
+      setShowSuccess(`✓ 文件已保存并回读验证：${result.filePath}`)
+      window.setTimeout(() => setShowSuccess(''), 4200)
     }
   }
 

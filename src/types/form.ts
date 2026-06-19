@@ -113,6 +113,8 @@ export interface OcclusionFormData {
   priority: '常规' | '加急' | '特急'
   dentistSignature: string
 
+  notes?: string
+
   createdAt?: string
   updatedAt?: string
 
@@ -146,6 +148,24 @@ export interface FormHistoryItem {
   lastUpdatedAt: string
   dentistName?: string
   priority?: string
+  status?: CaseStatus
+}
+
+export interface TransferSource {
+  type?: 'clinic' | 'lab'
+  name?: string
+  contact?: string
+  exportedAt?: string
+  importedAt?: string
+  importSourcePath?: string
+  caseStatusHint?: CaseStatus
+  latestNotes?: string
+}
+
+declare module './form' {
+  interface OcclusionFormData {
+    transferSource?: TransferSource
+  }
 }
 
 export interface FormStep {
@@ -162,3 +182,31 @@ export interface MissingField {
 }
 
 export type View = 'list' | 'fill' | 'preview' | 'receipt'
+
+export type CaseStatus =
+  | 'doctor_incomplete'   // 待医生补充
+  | 'awaiting_receipt'    // 待技工回执
+  | 'doctor_action'       // 需医生处理
+  | 'completed'           // 已完成
+
+export interface TransferPackage {
+  version: number
+  packageType: 'occlusion-transfer'
+  source: {
+    type: 'clinic' | 'lab'
+    name: string
+    contact?: string
+  }
+  formData: OcclusionFormData
+  latestNotes: string
+  caseStatus?: CaseStatus
+  history?: {
+    action: string
+    actor: string
+    time: string
+    note?: string
+  }[]
+  exportedAt?: string
+  importedAt?: string
+  importSourcePath?: string
+}

@@ -1,4 +1,4 @@
-import type { OcclusionFormData, MissingField } from '@/types/form'
+import type { OcclusionFormData, MissingField, CaseStatus } from '@/types/form'
 import { FORM_STEPS } from '@/constants/steps'
 
 interface FieldCheck {
@@ -53,4 +53,55 @@ export function getOverallProgress(data: OcclusionFormData): number {
   const total = FIELD_CHECKS.length
   const filled = FIELD_CHECKS.filter(fc => fc.check(data)).length
   return Math.round((filled / total) * 100)
+}
+
+export function determineCaseStatus(data: OcclusionFormData): CaseStatus {
+  const missing = getMissingFields(data)
+  const hasCoreMissing = missing.some(m =>
+    ['patientCode', 'restorationType', 'dentistName', 'clinicName', 'jawRecord.method'].includes(m.key)
+  )
+  if (hasCoreMissing || missing.length >= 3) {
+    return 'doctor_incomplete'
+  }
+  if (!data.receipt) {
+    return 'awaiting_receipt'
+  }
+  const receipt = data.receipt
+  const revisit = receipt.issues.selected?.some?.(i => i.severity === 'revisit')
+  const confirm = receipt.issues.selected?.some?.(i => i.severity === 'confirm')
+  if (receipt.requiresReturnVisit || revisit || confirm) {
+    return 'doctor_action'
+  }
+  return 'completed'
+}
+
+export const CASE_STATUS_META: Record<CaseStatus, { label: string; color: string; badge: string; icon: string; description: string }> = {
+  doctor_incomplete: {
+    label: '待医生补充',
+    color: '#0ea5e9',
+    badge: 'badge-blue',
+    icon: '📝',
+    description: '核心信息有缺失，需要医生继续完善'
+  },
+  awaiting_receipt: {
+    label: '待技工回执',
+    color: '#f59e0b',
+    badge: 'badge-orange',
+    icon: '⏳',
+    description: '已送交技工所，等待技师填写回执'
+  },
+  doctor_action: {
+    label: '需医生处理',
+    color: '#dc2626',
+    badge: 'badge-red',
+    icon: '⚠️',
+    description: '技工标注了需确认/返诊问题，需要医生处理'
+  },
+  completed: {
+    label: '已完成',
+    color: '#16a34a',
+    badge: 'badge-green',
+    icon: '✅',
+    description: '双方确认完毕，病例可归档'
+  }
 }

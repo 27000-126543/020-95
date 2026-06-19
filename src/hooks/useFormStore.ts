@@ -95,7 +95,9 @@ export function useFormStore() {
     updateReceipt,
     clearReceipt,
     addReceipt,
-    markSaved
+    markSaved,
+    setLoadedFilePath,
+    setFormData
   }
 }
 

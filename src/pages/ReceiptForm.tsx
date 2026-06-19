@@ -4,8 +4,9 @@ import { InputField, TextareaField, FormField } from '@/components/FormField'
 import type { TechnicianIssue, IssueSeverity, IssueWithSeverity, TechnicianReceipt } from '@/types/form'
 import { TECHNICIAN_ISSUES, MODEL_CONDITION_OPTIONS } from '@/constants/options'
 import { ISSUE_SEVERITY_MAP } from '@/constants/steps'
-import { validateReceipt, formatDate } from '@/utils/formUtils'
+import { validateReceipt, formatDate, migrateFormData } from '@/utils/formUtils'
 import { upsertHistory } from '@/utils/historyStore'
+import { toggleIssueWithSeverity, countIssuesBySeverity, buildTransferPackage } from '@/utils/issueManager'
 import type { FormStore } from '@/hooks/useFormStore'
 
 interface ReceiptFormProps {
@@ -15,20 +16,16 @@ interface ReceiptFormProps {
 }
 
 export function ReceiptForm({ store, onBack, onPreview }: ReceiptFormProps) {
-  const { formData, updateReceipt, loadedFilePath, clearReceipt, markSaved } = store
+  const { formData, updateReceipt, loadedFilePath, clearReceipt, markSaved, setFormData } = store
   const receipt = formData.receipt!
   const [errors, setErrors] = useState<string[]>([])
   const [showSuccess, setShowSuccess] = useState<string>('')
+  const [exportNotes, setExportNotes] = useState('')
 
   const selectedIssues = useMemo(() => receipt.issues.selected || [], [receipt.issues.selected])
 
-  const countsBySeverity = useMemo(() => {
-    const counts = { minor: 0, confirm: 0, revisit: 0 }
-    selectedIssues.forEach((item: IssueWithSeverity) => {
-      counts[item.severity]++
-    })
-    return counts
-  }, [selectedIssues])
+  const countsBySeverity = useMemo(() => countIssuesBySeverity(selectedIssues), [selectedIssues])
+  const anyRevisit = countsBySeverity.revisit > 0
 
   const updateReceiptData = (updates: Partial<TechnicianReceipt>) => {
     updateReceipt({ ...receipt, ...updates })
@@ -44,30 +41,28 @@ export function ReceiptForm({ store, onBack, onPreview }: ReceiptFormProps) {
     })
   }
 
+  const applyIssueUpdate = (issue: TechnicianIssue, severity: IssueSeverity | null) => {
+    const { selected, hasRevisit } = toggleIssueWithSeverity(selectedIssues, issue, severity)
+    let requiresReturnVisit = receipt.requiresReturnVisit
+    if (hasRevisit) {
+      requiresReturnVisit = true
+    } else if (severity === null && !receipt.requiresReturnVisit) {
+      requiresReturnVisit = false
+    }
+    updateReceipt({
+      ...receipt,
+      issues: { ...receipt.issues, selected },
+      requiresReturnVisit
+    })
+  }
+
   const toggleIssue = (issue: TechnicianIssue) => {
-    const existing = selectedIssues.find((i: IssueWithSeverity) => i.issue === issue)
-    let next: IssueWithSeverity[]
-    if (existing) {
-      next = selectedIssues.filter((i: IssueWithSeverity) => i.issue !== issue)
-    } else {
-      next = [...selectedIssues, { issue, severity: 'confirm' }]
-    }
-    updateReceiptSection('issues', { selected: next })
-    if (next.some((i: IssueWithSeverity) => i.severity === 'revisit')) {
-      updateReceiptData({ requiresReturnVisit: true })
-    } else if (next.length === 0) {
-      updateReceiptData({ requiresReturnVisit: false })
-    }
+    const existing = selectedIssues.find(i => i.issue === issue)
+    applyIssueUpdate(issue, existing ? null : 'confirm')
   }
 
   const setIssueSeverity = (issue: TechnicianIssue, severity: IssueSeverity) => {
-    const next = selectedIssues.map((i: IssueWithSeverity) =>
-      i.issue === issue ? { ...i, severity } : i
-    )
-    updateReceiptSection('issues', { selected: next })
-    if (severity === 'revisit') {
-      updateReceiptData({ requiresReturnVisit: true })
-    }
+    applyIssueUpdate(issue, severity)
   }
 
   const handleSave = async () => {
@@ -78,17 +73,24 @@ export function ReceiptForm({ store, onBack, onPreview }: ReceiptFormProps) {
     }
     setErrors([])
 
-    const fullData = {
-      ...formData,
-      receipt
-    }
+    const fullData = { ...formData, receipt }
 
     const result = await window.electronAPI.saveReceipt(fullData, loadedFilePath || undefined)
     if (result.success && result.filePath) {
+      // 回读验证：刚保存的文件重新读取确认数据一致
+      try {
+        const roundtrip = await window.electronAPI.loadFormByPath(result.filePath)
+        if (roundtrip.success && roundtrip.data) {
+          const normalized = migrateFormData(roundtrip.data as typeof fullData)
+          setFormData(normalized)
+        }
+      } catch {
+        /* 回读失败不阻塞保存成功 */
+      }
       markSaved(result.filePath)
       upsertHistory(result.filePath, fullData)
-      setShowSuccess(`✓ 回执已保存：${result.filePath}`)
-      setTimeout(() => setShowSuccess(''), 4000)
+      setShowSuccess(`✓ 回执已保存并回读验证：${result.filePath}`)
+      window.setTimeout(() => setShowSuccess(''), 4200)
     }
   }
 
@@ -96,6 +98,21 @@ export function ReceiptForm({ store, onBack, onPreview }: ReceiptFormProps) {
     if (confirm('确定要删除当前回执吗？此操作不可撤销。')) {
       clearReceipt()
       onBack()
+    }
+  }
+
+  const handleExportPackage = async () => {
+    const pkg = buildTransferPackage({ ...formData, receipt }, {
+      actorType: 'lab',
+      actorName: receipt.technicianName || receipt.labName || '技工所',
+      contact: undefined,
+      additionalNotes: exportNotes.trim() || undefined
+    })
+    const r = await window.electronAPI.exportPackage(pkg)
+    if (r.success && r.filePath) {
+      setShowSuccess(`✓ 交接包已导出：${r.filePath}`)
+      window.setTimeout(() => setShowSuccess(''), 4200)
+      setExportNotes('')
     }
   }
 
@@ -143,7 +160,7 @@ export function ReceiptForm({ store, onBack, onPreview }: ReceiptFormProps) {
         </div>
 
         <div className="severity-summary">
-          <h4>问题分级统计</h4>
+          <h4>问题分级统计 {anyRevisit && <span className="badge badge-red" style={{ marginLeft: 8 }}>⚠ 含需返诊</span>}</h4>
           <div className="severity-stats">
             {(['revisit', 'confirm', 'minor'] as IssueSeverity[]).map(sev => {
               const info = ISSUE_SEVERITY_MAP[sev]
@@ -154,6 +171,20 @@ export function ReceiptForm({ store, onBack, onPreview }: ReceiptFormProps) {
                 </div>
               )
             })}
+          </div>
+          <div className="summary-foot">
+            <TextareaField
+              label="交接备注（可选，随导出包一起发送）"
+              value={exportNotes}
+              onChange={(e: ChangeEvent<HTMLTextAreaElement>) => setExportNotes(e.target.value)}
+              placeholder="如：已与王医生确认咬合加高细节，详情电话沟通"
+              rows={2}
+            />
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 6 }}>
+              <button className="btn btn-secondary" onClick={handleExportPackage} title="导出包含回执、备注、历史记录的交接包">
+                📤 导出交接包
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -270,7 +301,7 @@ export function ReceiptForm({ store, onBack, onPreview }: ReceiptFormProps) {
 
         <FormSection
           title="是否需要返诊"
-          subtitle="如存在影响修复质量的问题，请标记并说明原因"
+          subtitle={`${anyRevisit ? '⚠ 当前勾选了【需返诊】级别的问题，已自动打开此开关。' : '如存在影响修复质量的问题，请手动标记并说明原因。'}`}
         >
           <div className="form-grid">
             <FormField label="处理方式">
