@@ -132,6 +132,7 @@ export interface TechnicianReceipt {
   }
   modelCondition: '良好' | '一般' | '较差' | ''
   requiresReturnVisit: boolean
+  returnVisitManuallySet?: boolean
   returnVisitReason: string
   estimatedCompletionDate: string
   specialInstructions: string
@@ -149,6 +150,11 @@ export interface FormHistoryItem {
   dentistName?: string
   priority?: string
   status?: CaseStatus
+  saved?: boolean
+  importSourcePath?: string
+  transferSource?: TransferSource
+  inMemoryData?: OcclusionFormData
+  pendingLocalSave?: boolean
 }
 
 export interface TransferSource {
@@ -160,6 +166,7 @@ export interface TransferSource {
   importSourcePath?: string
   caseStatusHint?: CaseStatus
   latestNotes?: string
+  history?: TransferPackage['history']
 }
 
 declare module './form' {

@@ -8,8 +8,15 @@ export function buildIssueFromId(id: string): IssueWithSeverity {
 export function toggleIssueWithSeverity(
   selected: IssueWithSeverity[] | undefined,
   issueId: string,
-  severity: IssueSeverity | null
-): { selected: IssueWithSeverity[]; hasRevisit: boolean; hasConfirm: boolean; hasMinor: boolean } {
+  severity: IssueSeverity | null,
+  options?: { returnVisitManuallySet?: boolean; currentRequiresReturnVisit?: boolean }
+): {
+  selected: IssueWithSeverity[]
+  hasRevisit: boolean
+  hasConfirm: boolean
+  hasMinor: boolean
+  requiresReturnVisit: boolean
+} {
   const base = selected ? [...selected] : []
   const idx = base.findIndex(i => i.issue === issueId)
 
@@ -23,11 +30,24 @@ export function toggleIssueWithSeverity(
     }
   }
 
+  const hasRevisit = base.some(i => i.severity === 'revisit')
+  const hasConfirm = base.some(i => i.severity === 'confirm')
+  const hasMinor = base.length > 0 && base.every(i => i.severity === 'minor')
+
+  // 手动打开的返诊开关不受自动逻辑影响
+  let requiresReturnVisit: boolean
+  if (options?.returnVisitManuallySet) {
+    requiresReturnVisit = options.currentRequiresReturnVisit ?? hasRevisit
+  } else {
+    requiresReturnVisit = hasRevisit || (options?.currentRequiresReturnVisit ?? false)
+  }
+
   return {
     selected: base,
-    hasRevisit: base.some(i => i.severity === 'revisit'),
-    hasConfirm: base.some(i => i.severity === 'confirm'),
-    hasMinor: base.length > 0 && base.every(i => i.severity === 'minor')
+    hasRevisit,
+    hasConfirm,
+    hasMinor,
+    requiresReturnVisit
   }
 }
 
@@ -60,10 +80,11 @@ export function buildTransferPackage(
   }
 ): TransferPackage {
   const status = opts.caseStatusOverride || determineCaseStatus(formData)
-  const existingHistory = (formData as unknown as { _transferHistory?: TransferPackage['history'] })._transferHistory
+  const existingSource = (formData as unknown as { transferSource?: { history?: TransferPackage['history'] } }).transferSource
+  const existingHistory = existingSource?.history || []
   const action = opts.actorType === 'clinic' ? '诊所发起/更新交接' : '技工所回执/反馈'
   const historyEntry: TransferPackage['history'] = [
-    ...(existingHistory || []),
+    ...existingHistory,
     {
       action,
       actor: opts.actorName || (opts.actorType === 'clinic' ? '诊所' : '技工所'),

@@ -1,9 +1,10 @@
 import { useState, useEffect, useMemo } from 'react'
 import type { FormHistoryItem, OcclusionFormData, CaseStatus, TransferPackage } from '@/types/form'
-import { getHistory, removeHistoryItem, clearHistory, saveHistory } from '@/utils/historyStore'
+import { getHistory, removeHistoryItem, clearHistory, saveHistory, upsertFromImport } from '@/utils/historyStore'
 import { formatDateTime } from '@/utils/formUtils'
 import { determineCaseStatus, CASE_STATUS_META } from '@/utils/stepValidator'
 import { migrateFormData } from '@/utils/formUtils'
+import { buildTransferPackage } from '@/utils/issueManager'
 
 interface FormListProps {
   onNewForm: () => void
@@ -55,22 +56,46 @@ export function FormList({ onNewForm, onOpenForm, onSelectForm, onImportedForm }
   }, [rows])
 
   const loadFromHistory = async (row: RowDisplay, targetViewHint?: string) => {
-    const result = await window.electronAPI.loadFormByPath(row.item.filePath)
-    if (result.success && result.data && result.filePath) {
-      const data = migrateFormData(result.data as OcclusionFormData)
-      const status = determineCaseStatus(data)
-      // 更新此条目的状态字段
-      const updatedHistory = getHistory().map(h =>
-        h.filePath === result.filePath ? { ...h, status, lastUpdatedAt: new Date().toISOString() } : h
-      )
-      saveHistory(updatedHistory)
-      setRows(updatedHistory.map(item => ({ item, status: (item.status || 'awaiting_receipt') as CaseStatus })))
-      onSelectForm(data, result.filePath, targetViewHint)
-    } else {
-      showToast(`文件读取失败：${result.error || '路径已失效'}`)
-      // 尝试自动刷新失效条目的状态
+    let data: OcclusionFormData | null = null
+    let filePath = row.item.filePath
+
+    // 有内存数据的待保存条目，直接用内存数据
+    if (row.item.inMemoryData) {
+      data = row.item.inMemoryData
+      filePath = ''
+    } else if (filePath.startsWith('mem://') && row.item.inMemoryData) {
+      data = row.item.inMemoryData
+      filePath = ''
+    } else if (filePath.startsWith('mem://')) {
+      showToast('⚠ 该记录已超出内存保留期，请从原导入的 .ocp.json 文件重新导入')
       setRows(prev => prev.map(r => r.item.filePath === row.item.filePath ? { ...r, invalidPath: true } : r))
+      return
+    } else {
+      const result = await window.electronAPI.loadFormByPath(filePath)
+      if (result.success && result.data && result.filePath) {
+        data = migrateFormData(result.data as OcclusionFormData)
+        filePath = result.filePath
+      } else {
+        showToast(`文件读取失败：${result.error || '路径已失效'}`)
+        setRows(prev => prev.map(r => r.item.filePath === row.item.filePath ? { ...r, invalidPath: true } : r))
+        return
+      }
     }
+
+    if (!data) {
+      showToast('❌ 无法获取该记录的数据')
+      return
+    }
+
+    const status = determineCaseStatus(data)
+    const updatedHistory = getHistory().map(h =>
+      h.id === row.item.id || h.filePath === row.item.filePath
+        ? { ...h, status, lastUpdatedAt: new Date().toISOString(), inMemoryData: data, pendingLocalSave: !filePath }
+        : h
+    )
+    saveHistory(updatedHistory)
+    setRows(updatedHistory.map(item => ({ item, status: (item.status || 'awaiting_receipt') as CaseStatus })))
+    onSelectForm(data, filePath, targetViewHint)
   }
 
   const handleRemove = (e: React.MouseEvent, filePath: string) => {
@@ -90,6 +115,85 @@ export function FormList({ onNewForm, onOpenForm, onSelectForm, onImportedForm }
     }
   }
 
+  const handleExportRow = async (e: React.MouseEvent, row: RowDisplay) => {
+    e.stopPropagation()
+    e.preventDefault()
+    let data: OcclusionFormData | null = null
+    let patientCode = row.item.patientCode || 'unknown'
+    if (row.item.inMemoryData) {
+      data = row.item.inMemoryData
+      patientCode = data.patientCode || patientCode
+    } else if (row.item.filePath && !row.item.filePath.startsWith('mem://')) {
+      const rt = await window.electronAPI.loadFormByPath(row.item.filePath)
+      if (rt.success && rt.data) {
+        data = migrateFormData(rt.data as OcclusionFormData)
+        patientCode = data.patientCode || patientCode
+      } else {
+        showToast('❌ 导出失败：无法读取文件')
+        return
+      }
+    } else {
+      showToast('❌ 该记录没有可用数据，请先保存或重新导入')
+      return
+    }
+    const actorName = data.receipt?.technicianName || data.receipt?.labName || data.dentistName || data.clinicName || '诊所'
+    const isLab = !!data.receipt && row.item.status !== 'doctor_incomplete'
+    const pkg = buildTransferPackage(data, {
+      actorType: isLab ? 'lab' : 'clinic',
+      actorName
+    })
+    const r = await window.electronAPI.exportPackage(pkg)
+    if (r.success && r.filePath) {
+      showToast('✅ 已导出交接包：' + r.filePath)
+    }
+  }
+
+  const handleBatchExport = async () => {
+    if (filteredRows.length === 0) return
+    const dataMap: Record<string, OcclusionFormData> = {}
+    for (const row of filteredRows) {
+      if (row.item.inMemoryData) {
+        dataMap[row.item.id] = row.item.inMemoryData
+      } else if (row.item.filePath && !row.item.filePath.startsWith('mem://') && !row.invalidPath) {
+        const rt = await window.electronAPI.loadFormByPath(row.item.filePath)
+        if (rt.success && rt.data) {
+          dataMap[row.item.id] = migrateFormData(rt.data as OcclusionFormData)
+        }
+      }
+    }
+    const ids = Object.keys(dataMap)
+    if (ids.length === 0) {
+      showToast('❌ 没有可导出的有效数据')
+      return
+    }
+    if (ids.length === 1) {
+      const row = filteredRows.find(r => r.item.id === ids[0])
+      if (row) {
+        const fakeEvt = { stopPropagation: () => {}, preventDefault: () => {} } as unknown as React.MouseEvent
+        return handleExportRow(fakeEvt, row)
+      }
+      return
+    }
+    const pkg = {
+      version: 1,
+      packageType: 'occlusion-transfer-batch' as const,
+      exportedAt: new Date().toISOString(),
+      count: ids.length,
+      items: ids.map(id => {
+        const d = dataMap[id]
+        const isLab = !!d.receipt
+        return buildTransferPackage(d, {
+          actorType: isLab ? 'lab' : 'clinic',
+          actorName: isLab ? (d.receipt?.technicianName || d.receipt?.labName || '技工所') : (d.dentistName || d.clinicName || '诊所')
+        })
+      })
+    }
+    const result = await window.electronAPI.exportPackage(pkg)
+    if (result.success && result.filePath) {
+      showToast(`✅ 已导出 ${ids.length} 份交接包：${result.filePath}`)
+    }
+  }
+
   const handleImport = async () => {
     const result = await window.electronAPI.importPackage()
     if (!result.success) {
@@ -100,21 +204,62 @@ export function FormList({ onNewForm, onOpenForm, onSelectForm, onImportedForm }
     const pkg = result.package as TransferPackage & { formData?: OcclusionFormData }
     const importedAt = new Date().toISOString()
     let formData: OcclusionFormData
+    let transferSource: FormHistoryItem['transferSource'] | undefined
+
+    // 支持批量包导入
+    if (pkg && (pkg as { packageType?: string }).packageType === 'occlusion-transfer-batch' && Array.isArray((pkg as unknown as { items?: TransferPackage[] }).items)) {
+      const batch = pkg as unknown as { items: TransferPackage[] }
+      let count = 0
+      for (const itemPkg of batch.items) {
+        if (itemPkg.formData) {
+          const ts: FormHistoryItem['transferSource'] = {
+            type: itemPkg.source?.type,
+            name: itemPkg.source?.name,
+            contact: itemPkg.source?.contact,
+            exportedAt: itemPkg.exportedAt,
+            importedAt,
+            importSourcePath: result.filePath,
+            caseStatusHint: itemPkg.caseStatus,
+            latestNotes: itemPkg.latestNotes,
+            history: itemPkg.history
+          }
+          const fd = migrateFormData({
+            ...itemPkg.formData,
+            transferSource: ts,
+            notes: itemPkg.latestNotes
+              ? (itemPkg.formData.notes
+                  ? `${itemPkg.formData.notes}\n\n[${importedAt.slice(0, 10)} 交接备注] ${itemPkg.latestNotes}`
+                  : `[${importedAt.slice(0, 10)} 交接备注] ${itemPkg.latestNotes}`)
+              : itemPkg.formData.notes
+          })
+          upsertFromImport(fd, result.filePath!, ts)
+          count += 1
+        }
+      }
+      refresh()
+      showToast(`✅ 已导入 ${count} 份交接包，显示在列表中（待保存）`)
+      return
+    }
+
     if (pkg && pkg.packageType === 'occlusion-transfer' && pkg.formData) {
+      transferSource = {
+        type: pkg.source?.type,
+        name: pkg.source?.name,
+        contact: pkg.source?.contact,
+        exportedAt: pkg.exportedAt,
+        importedAt,
+        importSourcePath: result.filePath,
+        caseStatusHint: pkg.caseStatus,
+        latestNotes: pkg.latestNotes,
+        history: pkg.history
+      }
       formData = migrateFormData({
         ...pkg.formData,
-        transferSource: {
-          type: pkg.source?.type,
-          name: pkg.source?.name,
-          contact: pkg.source?.contact,
-          exportedAt: pkg.exportedAt,
-          importedAt,
-          importSourcePath: result.filePath,
-          caseStatusHint: pkg.caseStatus,
-          latestNotes: pkg.latestNotes
-        },
+        transferSource,
         notes: pkg.latestNotes
-          ? (pkg.formData.notes ? `${pkg.formData.notes}\n\n[${importedAt.slice(0, 10)} 交接备注] ${pkg.latestNotes}` : `[${importedAt.slice(0, 10)} 交接备注] ${pkg.latestNotes}`)
+          ? (pkg.formData.notes
+              ? `${pkg.formData.notes}\n\n[${importedAt.slice(0, 10)} 交接备注] ${pkg.latestNotes}`
+              : `[${importedAt.slice(0, 10)} 交接备注] ${pkg.latestNotes}`)
           : pkg.formData.notes
       })
     } else if (pkg && ((pkg as unknown as OcclusionFormData).patientCode) !== undefined) {
@@ -123,7 +268,16 @@ export function FormList({ onNewForm, onOpenForm, onSelectForm, onImportedForm }
       showToast('未识别为有效的咬合交接单文件')
       return
     }
-    showToast('✅ 已导入交接包，首次保存时请选择本地存放路径')
+
+    // 立刻入历史（待保存状态），这样工作台能看到
+    if (transferSource && result.filePath) {
+      upsertFromImport(formData, result.filePath, transferSource)
+    } else {
+      upsertFromImport(formData, result.filePath || '', { importedAt, importSourcePath: result.filePath })
+    }
+    refresh()
+
+    showToast('✅ 已导入交接包，显示在列表中（待保存）')
     onImportedForm(formData, (pkg as TransferPackage)?.caseStatus)
   }
 
@@ -255,6 +409,11 @@ export function FormList({ onNewForm, onOpenForm, onSelectForm, onImportedForm }
           )}
         </div>
         <div className="spacer" />
+        {filteredRows.length > 0 && (
+          <button className="btn-link" onClick={handleBatchExport} title="导出当前筛选结果为交接包">
+            📤 批量导出
+          </button>
+        )}
         {history.length > 0 && (
           <button className="btn-link danger" onClick={handleClearAll}>
             清空历史
@@ -289,6 +448,7 @@ export function FormList({ onNewForm, onOpenForm, onSelectForm, onImportedForm }
                 <th>患者代号</th>
                 <th>修复类型</th>
                 <th>医生</th>
+                <th>来源</th>
                 <th>优先级</th>
                 <th>病例状态</th>
                 <th>最后更新</th>
@@ -299,20 +459,47 @@ export function FormList({ onNewForm, onOpenForm, onSelectForm, onImportedForm }
               {filteredRows.map(r => {
                 const item = r.item
                 const statusMeta = CASE_STATUS_META[r.status]
+                const isTransfer = !!item.transferSource || !!item.importSourcePath
+                const isPending = item.pendingLocalSave || !item.saved
+                const sourceType = item.transferSource?.type
+                const sourceName = item.transferSource?.name
                 return (
                   <tr
                     key={item.filePath}
-                    className={`history-row ${r.invalidPath ? 'list-row-highlight' : ''}`}
+                    className={`history-row ${r.invalidPath ? 'list-row-highlight' : ''} ${isPending ? 'list-row-highlight' : ''}`}
                     style={{
-                      ['--kb-color' as string]: r.invalidPath ? 'var(--color-danger)' : statusMeta.color
+                      ['--kb-color' as string]: isPending ? 'var(--color-warning)' : (r.invalidPath ? 'var(--color-danger)' : statusMeta.color)
                     } as React.CSSProperties}
                     onClick={() => loadFromHistory(r, hintForStatus(r.status))}
                   >
                     <td>
-                      <span className="patient-code">{item.patientCode || '-'}</span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span className="patient-code">{item.patientCode || '-'}</span>
+                        {isPending && (
+                          <span className="badge badge-orange" title="尚未保存到本地 JSON 文件">
+                            待保存
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td>{item.restorationType || '-'}</td>
                     <td>{item.dentistName || '-'}</td>
+                    <td>
+                      {isTransfer ? (
+                        <span
+                          className="status-badge badge-blue"
+                          title={sourceName ? `${sourceType === 'lab' ? '技工所' : '诊所'}：${sourceName}` : '外部交接包'}
+                        >
+                          <span>{sourceType === 'lab' ? '🏭' : '🏥'}</span>
+                          {sourceName || '外部交接包'}
+                        </span>
+                      ) : (
+                        <span className="status-badge badge-gray" title="本地创建或通过浏览文件打开">
+                          <span>💾</span>
+                          本地文件
+                        </span>
+                      )}
+                    </td>
                     <td>{getPriorityBadge(item.priority)}</td>
                     <td>
                       <span className={`status-badge ${statusMeta.badge}`}>
@@ -322,6 +509,13 @@ export function FormList({ onNewForm, onOpenForm, onSelectForm, onImportedForm }
                     </td>
                     <td className="date-cell">{formatDateTime(item.lastUpdatedAt)}</td>
                     <td className="action-cell">
+                      <button
+                        className="btn-icon"
+                        title="导出交接包"
+                        onClick={(ev) => handleExportRow(ev, r)}
+                      >
+                        📤
+                      </button>
                       <button
                         className="btn-icon"
                         title="打开"

@@ -5,7 +5,7 @@ import type { TechnicianIssue, IssueSeverity, IssueWithSeverity, TechnicianRecei
 import { TECHNICIAN_ISSUES, MODEL_CONDITION_OPTIONS } from '@/constants/options'
 import { ISSUE_SEVERITY_MAP } from '@/constants/steps'
 import { validateReceipt, formatDate, migrateFormData } from '@/utils/formUtils'
-import { upsertHistory } from '@/utils/historyStore'
+import { markAsSaved } from '@/utils/historyStore'
 import { toggleIssueWithSeverity, countIssuesBySeverity, buildTransferPackage } from '@/utils/issueManager'
 import type { FormStore } from '@/hooks/useFormStore'
 
@@ -42,17 +42,15 @@ export function ReceiptForm({ store, onBack, onPreview }: ReceiptFormProps) {
   }
 
   const applyIssueUpdate = (issue: TechnicianIssue, severity: IssueSeverity | null) => {
-    const { selected, hasRevisit } = toggleIssueWithSeverity(selectedIssues, issue, severity)
-    let requiresReturnVisit = receipt.requiresReturnVisit
-    if (hasRevisit) {
-      requiresReturnVisit = true
-    } else if (severity === null && !receipt.requiresReturnVisit) {
-      requiresReturnVisit = false
-    }
+    const { selected, requiresReturnVisit } = toggleIssueWithSeverity(selectedIssues, issue, severity, {
+      returnVisitManuallySet: receipt.returnVisitManuallySet,
+      currentRequiresReturnVisit: receipt.requiresReturnVisit
+    })
     updateReceipt({
       ...receipt,
       issues: { ...receipt.issues, selected },
-      requiresReturnVisit
+      requiresReturnVisit,
+      returnVisitManuallySet: receipt.returnVisitManuallySet // 保留手动标志
     })
   }
 
@@ -63,6 +61,15 @@ export function ReceiptForm({ store, onBack, onPreview }: ReceiptFormProps) {
 
   const setIssueSeverity = (issue: TechnicianIssue, severity: IssueSeverity) => {
     applyIssueUpdate(issue, severity)
+  }
+
+  const handleSetReturnVisit = (value: boolean) => {
+    // 用户手动切换：记录手动标志，自动逻辑不再覆盖
+    updateReceipt({
+      ...receipt,
+      requiresReturnVisit: value,
+      returnVisitManuallySet: true
+    })
   }
 
   const handleSave = async () => {
@@ -88,7 +95,7 @@ export function ReceiptForm({ store, onBack, onPreview }: ReceiptFormProps) {
         /* 回读失败不阻塞保存成功 */
       }
       markSaved(result.filePath)
-      upsertHistory(result.filePath, fullData)
+      markAsSaved(formData.id || 'tmp-id', result.filePath, fullData)
       setShowSuccess(`✓ 回执已保存并回读验证：${result.filePath}`)
       window.setTimeout(() => setShowSuccess(''), 4200)
     }
@@ -310,7 +317,7 @@ export function ReceiptForm({ store, onBack, onPreview }: ReceiptFormProps) {
                   <input
                     type="radio"
                     checked={!receipt.requiresReturnVisit}
-                    onChange={() => updateReceiptData({ requiresReturnVisit: false })}
+                    onChange={() => handleSetReturnVisit(false)}
                     className="radio-input"
                   />
                   <span className="radio-label">正常制作，无需返诊</span>
@@ -319,12 +326,17 @@ export function ReceiptForm({ store, onBack, onPreview }: ReceiptFormProps) {
                   <input
                     type="radio"
                     checked={receipt.requiresReturnVisit}
-                    onChange={() => updateReceiptData({ requiresReturnVisit: true })}
+                    onChange={() => handleSetReturnVisit(true)}
                     className="radio-input"
                   />
                   <span className="radio-label">需要返诊重取记录</span>
                 </label>
               </div>
+              {receipt.returnVisitManuallySet && (
+                <p className="field-help" style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 6 }}>
+                  💡 已手动设置，问题勾选不会自动修改此开关
+                </p>
+              )}
             </FormField>
 
             {receipt.requiresReturnVisit && (

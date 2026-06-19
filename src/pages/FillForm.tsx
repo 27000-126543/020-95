@@ -15,7 +15,7 @@ import {
 import { FORM_STEPS } from '@/constants/steps'
 import { validateForm, migrateFormData } from '@/utils/formUtils'
 import { getMissingFields, getStepProgress, getOverallProgress } from '@/utils/stepValidator'
-import { upsertHistory } from '@/utils/historyStore'
+import { markAsSaved } from '@/utils/historyStore'
 import type { FormStore } from '@/hooks/useFormStore'
 
 interface FillFormProps {
@@ -71,7 +71,7 @@ export function FillForm({ store, onPreview, onBackToList, focusReceipt }: FillF
         }
       } catch { /* 不阻塞 */ }
       markSaved(result.filePath)
-      upsertHistory(result.filePath, formData)
+      markAsSaved(formData.id || 'tmp-id', result.filePath, formData)
       setShowSuccess(`✓ 文件已保存并回读验证：${result.filePath}`)
       window.setTimeout(() => setShowSuccess(''), 4200)
     }

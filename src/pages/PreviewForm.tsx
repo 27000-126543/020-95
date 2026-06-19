@@ -1,8 +1,8 @@
 import { useState, useMemo, useEffect, useRef } from 'react'
-import type { OcclusionFormData, IssueWithSeverity, MovementObservation, SpecialConcern, TechnicianIssue, IssueSeverity } from '@/types/form'
+import type { OcclusionFormData, IssueWithSeverity, MovementObservation, SpecialConcern, TechnicianIssue, IssueSeverity, TransferPackage } from '@/types/form'
 import { formatDate, formatDateTime, validateForm, migrateFormData } from '@/utils/formUtils'
 import { ISSUE_SEVERITY_MAP } from '@/constants/steps'
-import { upsertHistory } from '@/utils/historyStore'
+import { markAsSaved } from '@/utils/historyStore'
 import { buildTransferPackage } from '@/utils/issueManager'
 import type { FormStore } from '@/hooks/useFormStore'
 
@@ -50,7 +50,7 @@ export function PreviewForm({ store, onBack, onFillReceipt, onBackToList, focusS
         /* 回读失败不阻塞 */
       }
       markSaved(result.filePath)
-      upsertHistory(result.filePath, formData)
+      markAsSaved(formData.id || 'tmp-id', result.filePath, formData)
       setShowSuccess('✓ 文件已保存并验证：' + result.filePath)
       window.setTimeout(() => setShowSuccess(''), 4200)
     }
@@ -148,6 +148,33 @@ export function PreviewForm({ store, onBack, onFillReceipt, onBackToList, focusS
           {transferSource.latestNotes && <span>· 最近备注：<em style={{ color: 'var(--text-primary)' }}>"{transferSource.latestNotes}"</em></span>}
         </div>
       )}
+
+      {(() => {
+        const src = transferSource as { history?: TransferPackage['history'] } | undefined
+        const history = src?.history
+        if (!history || history.length === 0) return null
+        return (
+          <div className="transfer-history no-print" style={{
+            padding: '12px 16px',
+            background: 'rgba(15, 23, 42, 0.04)',
+            borderRadius: '8px',
+            marginBottom: '16px',
+            borderLeft: '3px solid var(--color-primary)'
+          }}>
+            <h4 style={{ fontSize: 13, fontWeight: 600, margin: '0 0 8px 0', color: 'var(--text-primary)' }}>📜 流转历史</h4>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 13 }}>
+              {history.map((h, idx: number) => (
+                <div key={idx} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, color: 'var(--text-secondary)' }}>
+                  <span style={{ opacity: 0.6, flexShrink: 0 }}>[{formatDateTime(h.time)}]</span>
+                  <strong style={{ color: 'var(--text-primary)' }}>{h.actor}</strong>
+                  <span>{h.action}</span>
+                  {h.note && <em>"{h.note}"</em>}
+                </div>
+              ))}
+            </div>
+          </div>
+        )
+      })()}
 
       <div className="preview-content">
         <div className="preview-header print-only">
