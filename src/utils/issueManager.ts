@@ -34,12 +34,19 @@ export function toggleIssueWithSeverity(
   const hasConfirm = base.some(i => i.severity === 'confirm')
   const hasMinor = base.length > 0 && base.every(i => i.severity === 'minor')
 
-  // 手动打开的返诊开关不受自动逻辑影响
+  // 返诊开关自动 / 手动分离：
+  // - 手动模式（returnVisitManuallySet = true）：用户自己切过开关，问题勾选**绝不**关闭返诊；但有 revisit 问题时仍然会打开
+  // - 自动模式：跟随 hasRevisit 变化
   let requiresReturnVisit: boolean
+  const current = options?.currentRequiresReturnVisit ?? hasRevisit
   if (options?.returnVisitManuallySet) {
-    requiresReturnVisit = options.currentRequiresReturnVisit ?? hasRevisit
+    if (hasRevisit) {
+      requiresReturnVisit = true  // 手动模式下，勾了 revisit 还是自动开（避免用户忘记）
+    } else {
+      requiresReturnVisit = current  // 未勾 revisit，保持用户之前手动的设置
+    }
   } else {
-    requiresReturnVisit = hasRevisit || (options?.currentRequiresReturnVisit ?? false)
+    requiresReturnVisit = hasRevisit
   }
 
   return {
@@ -89,7 +96,9 @@ export function buildTransferPackage(
       action,
       actor: opts.actorName || (opts.actorType === 'clinic' ? '诊所' : '技工所'),
       time: new Date().toISOString(),
-      note: opts.additionalNotes
+      note: opts.additionalNotes,
+      caseStatus: status,
+      side: opts.actorType
     }
   ]
 

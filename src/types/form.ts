@@ -155,6 +155,9 @@ export interface FormHistoryItem {
   transferSource?: TransferSource
   inMemoryData?: OcclusionFormData
   pendingLocalSave?: boolean
+  importBatchId?: string
+  isNewlyImported?: boolean
+  viewedAt?: string
 }
 
 export interface TransferSource {
@@ -167,6 +170,7 @@ export interface TransferSource {
   caseStatusHint?: CaseStatus
   latestNotes?: string
   history?: TransferPackage['history']
+  importBatchId?: string
 }
 
 declare module './form' {
@@ -212,8 +216,11 @@ export interface TransferPackage {
     actor: string
     time: string
     note?: string
+    caseStatus?: CaseStatus
+    side?: 'clinic' | 'lab'
   }[]
   exportedAt?: string
   importedAt?: string
   importSourcePath?: string
+  importBatchId?: string
 }

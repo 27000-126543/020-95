@@ -1,6 +1,15 @@
 import { useState, useEffect, useMemo } from 'react'
 import type { FormHistoryItem, OcclusionFormData, CaseStatus, TransferPackage } from '@/types/form'
-import { getHistory, removeHistoryItem, clearHistory, saveHistory, upsertFromImport } from '@/utils/historyStore'
+import {
+  getHistory,
+  removeHistoryItem,
+  clearHistory,
+  saveHistory,
+  upsertFromImport,
+  startNewImportBatch,
+  markAsViewed,
+  isRecentlyImported
+} from '@/utils/historyStore'
 import { formatDateTime } from '@/utils/formUtils'
 import { determineCaseStatus, CASE_STATUS_META } from '@/utils/stepValidator'
 import { migrateFormData } from '@/utils/formUtils'
@@ -21,12 +30,15 @@ interface RowDisplay {
   invalidPath?: boolean
 }
 
+type HistEntry = NonNullable<TransferPackage['history']>[number]
+
 export function FormList({ onNewForm, onOpenForm, onSelectForm, onImportedForm }: FormListProps) {
   const [history, setHistory] = useState<FormHistoryItem[]>([])
   const [rows, setRows] = useState<RowDisplay[]>([])
   const [searchTerm, setSearchTerm] = useState('')
   const [kanbanFilter, setKanbanFilter] = useState<KanbanFilter>('all')
   const [toast, setToast] = useState<string | null>(null)
+  const [expandedRowId, setExpandedRowId] = useState<string | null>(null)
 
   const refresh = () => {
     const h = getHistory()
@@ -95,6 +107,8 @@ export function FormList({ onNewForm, onOpenForm, onSelectForm, onImportedForm }
     )
     saveHistory(updatedHistory)
     setRows(updatedHistory.map(item => ({ item, status: (item.status || 'awaiting_receipt') as CaseStatus })))
+    markAsViewed(row.item.id)
+    refresh()
     onSelectForm(data, filePath, targetViewHint)
   }
 
@@ -205,11 +219,13 @@ export function FormList({ onNewForm, onOpenForm, onSelectForm, onImportedForm }
     const importedAt = new Date().toISOString()
     let formData: OcclusionFormData
     let transferSource: FormHistoryItem['transferSource'] | undefined
+    const batchId = startNewImportBatch()
 
     // 支持批量包导入
     if (pkg && (pkg as { packageType?: string }).packageType === 'occlusion-transfer-batch' && Array.isArray((pkg as unknown as { items?: TransferPackage[] }).items)) {
       const batch = pkg as unknown as { items: TransferPackage[] }
       let count = 0
+      let firstItem: { fd: OcclusionFormData; ts: FormHistoryItem['transferSource'] } | null = null
       for (const itemPkg of batch.items) {
         if (itemPkg.formData) {
           const ts: FormHistoryItem['transferSource'] = {
@@ -221,7 +237,8 @@ export function FormList({ onNewForm, onOpenForm, onSelectForm, onImportedForm }
             importSourcePath: result.filePath,
             caseStatusHint: itemPkg.caseStatus,
             latestNotes: itemPkg.latestNotes,
-            history: itemPkg.history
+            history: itemPkg.history,
+            importBatchId: batchId
           }
           const fd = migrateFormData({
             ...itemPkg.formData,
@@ -232,12 +249,18 @@ export function FormList({ onNewForm, onOpenForm, onSelectForm, onImportedForm }
                   : `[${importedAt.slice(0, 10)} 交接备注] ${itemPkg.latestNotes}`)
               : itemPkg.formData.notes
           })
-          upsertFromImport(fd, result.filePath!, ts)
+          upsertFromImport(fd, result.filePath!, ts, { importBatchId: batchId })
+          if (!firstItem) firstItem = { fd, ts }
           count += 1
         }
       }
       refresh()
-      showToast(`✅ 已导入 ${count} 份交接包，显示在列表中（待保存）`)
+      showToast(`✅ 已导入 ${count} 份交接包，显示在收件箱（待保存）`)
+      if (firstItem) {
+        // 对于批量包，留在工作台不自动跳转，用户能一条条选择
+        // onImportedForm(firstItem.fd, firstItem.ts.caseStatusHint)
+        // 但至少 toast 已告知
+      }
       return
     }
 
@@ -251,7 +274,8 @@ export function FormList({ onNewForm, onOpenForm, onSelectForm, onImportedForm }
         importSourcePath: result.filePath,
         caseStatusHint: pkg.caseStatus,
         latestNotes: pkg.latestNotes,
-        history: pkg.history
+        history: pkg.history,
+        importBatchId: batchId
       }
       formData = migrateFormData({
         ...pkg.formData,
@@ -271,13 +295,13 @@ export function FormList({ onNewForm, onOpenForm, onSelectForm, onImportedForm }
 
     // 立刻入历史（待保存状态），这样工作台能看到
     if (transferSource && result.filePath) {
-      upsertFromImport(formData, result.filePath, transferSource)
+      upsertFromImport(formData, result.filePath, transferSource, { importBatchId: batchId })
     } else {
-      upsertFromImport(formData, result.filePath || '', { importedAt, importSourcePath: result.filePath })
+      upsertFromImport(formData, result.filePath || '', { importedAt, importSourcePath: result.filePath, importBatchId: batchId })
     }
     refresh()
 
-    showToast('✅ 已导入交接包，显示在列表中（待保存）')
+    showToast('✅ 已导入交接包，显示在收件箱（待保存）')
     onImportedForm(formData, (pkg as TransferPackage)?.caseStatus)
   }
 
@@ -310,6 +334,155 @@ export function FormList({ onNewForm, onOpenForm, onSelectForm, onImportedForm }
       default: return undefined
     }
   }
+
+  const inboxRows = useMemo(() => filteredRows.filter(r => isRecentlyImported(r.item) || r.item.pendingLocalSave), [filteredRows])
+  const archivedRows = useMemo(() => filteredRows.filter(r => !(isRecentlyImported(r.item) || r.item.pendingLocalSave)), [filteredRows])
+
+  const renderHistoryTimeline = (r: RowDisplay) => {
+    const src = r.item.transferSource as { history?: HistEntry[] } | undefined
+    const hist = src?.history || []
+    if (hist.length === 0) {
+      return (
+        <div style={{ padding: '8px 14px', color: 'var(--text-secondary)', fontSize: 13, borderTop: '1px dashed var(--border-color)' }}>
+          暂无沟通记录
+        </div>
+      )
+    }
+    return (
+      <div style={{ padding: '10px 14px', borderTop: '1px dashed var(--border-color)' }}>
+        <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8, color: 'var(--text-primary)' }}>📜 沟通时间线</div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 13 }}>
+          {[...hist].reverse().map((h, idx) => (
+            <div key={idx} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, color: 'var(--text-secondary)', flexWrap: 'wrap' }}>
+              <span style={{ opacity: 0.6, flexShrink: 0 }}>[{formatDateTime(h.time)}]</span>
+              <strong style={{ color: 'var(--text-primary)' }}>
+                {h.side === 'lab' ? '🏭' : h.side === 'clinic' ? '🏥' : '📮'} {h.actor}
+              </strong>
+              <span>{h.action}</span>
+              {h.caseStatus && h.caseStatus in CASE_STATUS_META && (
+                <span
+                  className={`badge ${CASE_STATUS_META[h.caseStatus].badge}`}
+                  style={{ fontSize: 11, padding: '1px 6px' }}
+                >
+                  {CASE_STATUS_META[h.caseStatus].label}
+                </span>
+              )}
+              {h.note && <em style={{ color: 'var(--text-primary)' }}>"{h.note}"</em>}
+            </div>
+          ))}
+        </div>
+      </div>
+    )
+  }
+
+  const renderTableBody = (rowsToRender: RowDisplay[]) => (
+    <tbody>
+      {rowsToRender.flatMap((r) => {
+        const item = r.item
+        const statusMeta = CASE_STATUS_META[r.status]
+        const isTransfer = !!item.transferSource || !!item.importSourcePath
+        const sourceType = item.transferSource?.type
+        const sourceName = item.transferSource?.name
+        const isNew = isRecentlyImported(item)
+        const isPending = item.pendingLocalSave || !item.saved
+        const expanded = expandedRowId === item.id
+        return [
+          <tr
+            key={`row-${item.id}`}
+            className={`history-row ${r.invalidPath ? 'list-row-highlight' : ''} ${isPending ? 'list-row-highlight' : ''} ${isNew ? 'list-row-highlight' : ''}`}
+            style={{
+              ['--kb-color' as string]: isNew
+                ? 'var(--color-primary)'
+                : (isPending ? 'var(--color-warning)' : (r.invalidPath ? 'var(--color-danger)' : statusMeta.color))
+            } as React.CSSProperties}
+            onClick={() => loadFromHistory(r, hintForStatus(r.status))}
+          >
+            <td style={{ padding: '6px 0 6px 10px' }} onClick={(ev) => ev.stopPropagation()}>
+              <button
+                className="btn-icon"
+                onClick={() => setExpandedRowId(expanded ? null : item.id)}
+                title={expanded ? '收起时间线' : '展开沟通时间线'}
+                style={{ padding: '0 4px' }}
+              >
+                {expanded ? '▼' : '▶'}
+              </button>
+            </td>
+            <td>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span className="patient-code">{item.patientCode || '-'}</span>
+                {isNew && (
+                  <span className="badge badge-blue" title="最近 48 小时内新导入">
+                    🆕 新
+                  </span>
+                )}
+                {isPending && (
+                  <span className="badge badge-orange" title="尚未保存到本地 JSON 文件">
+                    待保存
+                  </span>
+                )}
+              </div>
+            </td>
+            <td>{item.restorationType || '-'}</td>
+            <td>{item.dentistName || '-'}</td>
+            <td>
+              {isTransfer ? (
+                <span
+                  className="status-badge badge-blue"
+                  title={sourceName ? `${sourceType === 'lab' ? '技工所' : '诊所'}：${sourceName}` : '外部交接包'}
+                >
+                  <span>{sourceType === 'lab' ? '🏭' : '🏥'}</span>
+                  {sourceName || '外部交接包'}
+                </span>
+              ) : (
+                <span className="status-badge badge-gray" title="本地创建或通过浏览文件打开">
+                  <span>💾</span>
+                  本地文件
+                </span>
+              )}
+            </td>
+            <td>{getPriorityBadge(item.priority)}</td>
+            <td>
+              <span className={`status-badge ${statusMeta.badge}`}>
+                <span>{statusMeta.icon}</span>
+                {r.invalidPath ? '文件已失效' : statusMeta.label}
+              </span>
+            </td>
+            <td className="date-cell">{formatDateTime(item.lastUpdatedAt)}</td>
+            <td className="action-cell">
+              <button
+                className="btn-icon"
+                title="导出交接包"
+                onClick={(ev) => handleExportRow(ev, r)}
+              >
+                📤
+              </button>
+              <button
+                className="btn-icon"
+                title="打开"
+                onClick={(ev) => { ev.stopPropagation(); loadFromHistory(r) }}
+              >
+                📂
+              </button>
+              <button
+                className="btn-icon danger"
+                title="从列表移除"
+                onClick={e => handleRemove(e, item.filePath)}
+              >
+                ✕
+              </button>
+            </td>
+          </tr>,
+          expanded ? (
+            <tr key={`tl-${item.id}`} onClick={(ev) => ev.stopPropagation()} style={{ cursor: 'default' }}>
+              <td colSpan={9} style={{ padding: 0 }}>
+                {renderHistoryTimeline(r)}
+              </td>
+            </tr>
+          ) : null
+        ] as (JSX.Element | null)[]
+      })}
+    </tbody>
+  )
 
   const renderKanban = () => {
     const order: CaseStatus[] = ['doctor_incomplete', 'awaiting_receipt', 'doctor_action', 'completed']
@@ -441,102 +614,62 @@ export function FormList({ onNewForm, onOpenForm, onSelectForm, onImportedForm }
           )}
         </div>
       ) : (
-        <div className="list-container">
-          <table className="history-table">
-            <thead>
-              <tr>
-                <th>患者代号</th>
-                <th>修复类型</th>
-                <th>医生</th>
-                <th>来源</th>
-                <th>优先级</th>
-                <th>病例状态</th>
-                <th>最后更新</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredRows.map(r => {
-                const item = r.item
-                const statusMeta = CASE_STATUS_META[r.status]
-                const isTransfer = !!item.transferSource || !!item.importSourcePath
-                const isPending = item.pendingLocalSave || !item.saved
-                const sourceType = item.transferSource?.type
-                const sourceName = item.transferSource?.name
-                return (
-                  <tr
-                    key={item.filePath}
-                    className={`history-row ${r.invalidPath ? 'list-row-highlight' : ''} ${isPending ? 'list-row-highlight' : ''}`}
-                    style={{
-                      ['--kb-color' as string]: isPending ? 'var(--color-warning)' : (r.invalidPath ? 'var(--color-danger)' : statusMeta.color)
-                    } as React.CSSProperties}
-                    onClick={() => loadFromHistory(r, hintForStatus(r.status))}
-                  >
-                    <td>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <span className="patient-code">{item.patientCode || '-'}</span>
-                        {isPending && (
-                          <span className="badge badge-orange" title="尚未保存到本地 JSON 文件">
-                            待保存
-                          </span>
-                        )}
-                      </div>
-                    </td>
-                    <td>{item.restorationType || '-'}</td>
-                    <td>{item.dentistName || '-'}</td>
-                    <td>
-                      {isTransfer ? (
-                        <span
-                          className="status-badge badge-blue"
-                          title={sourceName ? `${sourceType === 'lab' ? '技工所' : '诊所'}：${sourceName}` : '外部交接包'}
-                        >
-                          <span>{sourceType === 'lab' ? '🏭' : '🏥'}</span>
-                          {sourceName || '外部交接包'}
-                        </span>
-                      ) : (
-                        <span className="status-badge badge-gray" title="本地创建或通过浏览文件打开">
-                          <span>💾</span>
-                          本地文件
-                        </span>
-                      )}
-                    </td>
-                    <td>{getPriorityBadge(item.priority)}</td>
-                    <td>
-                      <span className={`status-badge ${statusMeta.badge}`}>
-                        <span>{statusMeta.icon}</span>
-                        {r.invalidPath ? '文件已失效' : statusMeta.label}
-                      </span>
-                    </td>
-                    <td className="date-cell">{formatDateTime(item.lastUpdatedAt)}</td>
-                    <td className="action-cell">
-                      <button
-                        className="btn-icon"
-                        title="导出交接包"
-                        onClick={(ev) => handleExportRow(ev, r)}
-                      >
-                        📤
-                      </button>
-                      <button
-                        className="btn-icon"
-                        title="打开"
-                        onClick={(ev) => { ev.stopPropagation(); loadFromHistory(r) }}
-                      >
-                        📂
-                      </button>
-                      <button
-                        className="btn-icon danger"
-                        title="从列表移除"
-                        onClick={e => handleRemove(e, item.filePath)}
-                      >
-                        ✕
-                      </button>
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
-        </div>
+        <>
+          {inboxRows.length > 0 && (
+            <div style={{ marginBottom: 24 }}>
+              <h3 style={{ fontSize: 15, fontWeight: 600, margin: '0 0 10px 2px', color: 'var(--color-primary)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                📥 收件箱 <span className="badge badge-blue">{inboxRows.length} 份新病例</span>
+                <span style={{ fontSize: 12, fontWeight: 400, color: 'var(--text-secondary)' }}>
+                  点击病例行进行处理，或点击左侧 ▶ 查看沟通记录
+                </span>
+              </h3>
+              <div className="list-container">
+                <table className="history-table">
+                  <thead>
+                    <tr>
+                      <th style={{ width: 28 }}></th>
+                      <th>患者代号</th>
+                      <th>修复类型</th>
+                      <th>医生</th>
+                      <th>来源</th>
+                      <th>优先级</th>
+                      <th>病例状态</th>
+                      <th>最后更新</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  {renderTableBody(inboxRows)}
+                </table>
+              </div>
+            </div>
+          )}
+
+          {archivedRows.length > 0 && (
+            <div>
+              <h3 style={{ fontSize: 15, fontWeight: 600, margin: '0 0 10px 2px', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                🗂 已查看 / 本地文件 <span className="badge" style={{ background: 'rgba(15,23,42,0.08)' }}>{archivedRows.length} 份</span>
+              </h3>
+              <div className="list-container">
+                <table className="history-table">
+                  <thead>
+                    <tr>
+                      <th style={{ width: 28 }}></th>
+                      <th>患者代号</th>
+                      <th>修复类型</th>
+                      <th>医生</th>
+                      <th>来源</th>
+                      <th>优先级</th>
+                      <th>病例状态</th>
+                      <th>最后更新</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  {renderTableBody(archivedRows)}
+                </table>
+              </div>
+            </div>
+          )}
+        </>
       )}
 
       <div className="list-footer-hint">
